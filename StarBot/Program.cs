@@ -1,16 +1,17 @@
 ﻿using System;
 using VkNet;
-using VkNet.Utils;
 using VkNet.Enums;
 using VkNet.Enums.SafetyEnums;
 using VkNet.Enums.Filters;
 using VkNet.Model.RequestParams;
 using System.Threading;
 using VkNet.Model;
+using System.Text;
+using System.Threading.Tasks;
 
 namespace StarBot
 {
-    class Program
+    static class Program
     {
         static Random random = new Random();
         static VkApi vk = new VkApi();
@@ -39,11 +40,12 @@ namespace StarBot
             Console.WriteLine("Начинаем авторизацию...");
             if (Auth())
             {
-                User Bot = vk.Users.Get(vk.UserId.Value);
+                long[] temp = new long[] { vk.UserId.Value };
+                var users = vk.Users.Get(temp, ProfileFields.Sex | ProfileFields.FirstName | ProfileFields.LastName);
+                User Bot = users[0];
                 Console.WriteLine($"Авторизация прошла успешно. Добро пожаловать, {Bot.FirstName} {Bot.LastName}.");
-                //var Friends = GetFriends();
                 GetAndSetConfs(out int ConfID);
-                CheckMessages(Bot.Id, ConfID);
+                CheckMessages(ConfID);
                 Console.WriteLine($"Программа завершила свою работу");
                 Console.ReadKey();
             }
@@ -55,8 +57,8 @@ namespace StarBot
                 vk.Authorize(new ApiAuthParams
                 {
                     ApplicationId = 6150077,
-                    Login = "375296901425",
-                    Password = "knopkagovna1488",
+                    Login = "",
+                    Password = "",
                     Settings = Settings.All,
                     TwoFactorAuthorization = code
                 });
@@ -68,22 +70,12 @@ namespace StarBot
                 return false;
             }
         }
-        static VkCollection<User> GetFriends()
-        {
-            VkCollection<User> Friends = vk.Friends.Get(new FriendsGetParams
-            {
-                UserId = vk.UserId,
-                Fields = ProfileFields.FirstName | ProfileFields.LastName,
-                Order = FriendsOrder.Name
-            });
-            return Friends;
-        }
-        static void CheckMessages(long CheckedUserID, int ConfID)
+        static void CheckMessages(int ConfID)
         {
             Console.WriteLine("Сканируем сообщения...");
             long BotID = vk.UserId.Value;
             bool Enabled = true;
-            Message CurrentMessage = null;
+            Message CurrentMessage = null;  
             Message LastMessage = null;
             bool IsFirst = true;
             while (Enabled)
@@ -104,7 +96,7 @@ namespace StarBot
                         CurrentMessage = vk.Messages.Get(new MessagesGetParams
                         {
                             Count = 1,
-                            Out = MessageType.Received
+                            Filters = MessagesFilter.All
                         }).Messages[0];
 
                         if (CurrentMessage.UserId != BotID && CurrentMessage.Date != LastMessage.Date && CurrentMessage.ChatId == ConfID)
@@ -121,12 +113,13 @@ namespace StarBot
                 }
             }
         }
-        static void Command(long checkedUserID, string Message, long ConfId)
+        static async void Command(long checkedUserID, string Message, long ConfId)
         {
-            User Sender = vk.Users.Get(checkedUserID, ProfileFields.Sex | ProfileFields.FirstName | ProfileFields.LastName);
+            var users = vk.Users.Get(new long[] { checkedUserID }, ProfileFields.Sex | ProfileFields.FirstName | ProfileFields.LastName);
+            User Sender = users[0];
             string SenderName = $"{Sender.FirstName} {Sender.LastName}";
             bool Contains = false;
-            string SendedMessage;
+            string SendedMessage = String.Empty;
             int CmdId = 0;
             for (int i = 0; i < Commands.Length; i++)
             {
@@ -187,6 +180,61 @@ namespace StarBot
                         SendToConf(SendedMessage, ConfId);
                         Console.WriteLine($"{SendedMessage} -->> {SenderName}");
                         break;
+                    case 3:
+                        Schedule.SavedUser = await Schedule.GetCurrentUser("Kudryvec_MV_17");
+                        await Schedule.GetMySchedule();
+                        StringBuilder sb = new StringBuilder();
+                        for (int i = 0; i < Schedule.SavedSchedule.count; i++)
+                        {
+                            string day = String.Empty;
+                            var s = DateTime.Parse(Schedule.SavedSchedule.days[i].date).DayOfWeek;
+                            switch(s)
+                            {
+                                case DayOfWeek.Monday:
+                                    day = "Понедельник";
+                                    break;
+                                case DayOfWeek.Tuesday:
+                                    day = "Вторник";
+                                    break;
+                                case DayOfWeek.Wednesday:
+                                    day = "Среда";
+                                    break;
+                                case DayOfWeek.Thursday:
+                                    day = "Четверг";
+                                    break;
+                                case DayOfWeek.Friday:
+                                    day = "Пятница";
+                                    break;
+                                case DayOfWeek.Saturday:
+                                    day = "Суббота";
+                                    break;
+                            }
+                            sb.Append($"{Schedule.SavedSchedule.days[i].date} ({day})" + "\n");
+                            sb.Append(new string('*', 60) + "\n");
+                            for (int j = 0; j < Schedule.SavedSchedule.days[i].lessons.Length; j++)
+                            {
+                                sb.Append($"{Schedule.SavedSchedule.days[i].lessons[j].timeStart} - {Schedule.SavedSchedule.days[i].lessons[j].timeEnd} | {Schedule.SavedSchedule.days[i].lessons[j].title} ({Schedule.SavedSchedule.days[i].lessons[j].type}). Кабинет: {Schedule.SavedSchedule.days[i].lessons[j].room}\n");
+                            }
+                            sb.Append(new string('*', 60) + "\n");
+                        }
+                        SendToConf(sb.ToString(), ConfId);
+                        Console.WriteLine($"{sb.ToString()} -->> {SenderName}");
+                        break;
+                    case 4:
+                        if (random.Next() % 2 == 0)
+                        {
+                            SendedMessage = $"Вроде неплохо";
+                            SendToConf(SendedMessage, ConfId);
+                            Console.WriteLine($"{SendedMessage} -->> {SenderName}");
+                            break;
+                        }
+                        else
+                        {
+                            SendedMessage = $"На самом деле осозновать что ты всего-лишь бот грустно...";
+                            SendToConf(SendedMessage, ConfId);
+                            Console.WriteLine($"{SendedMessage} -->> {SenderName}");
+                            break;
+                        }
                     case 5:
                         Console.WriteLine($"Начинаем лайкать стену пользователя: {SenderName}");
                         LikeWall(Sender.Id, ConfId, SenderName);
@@ -207,6 +255,9 @@ namespace StarBot
                     case 6:
                         Console.WriteLine($"Начинаем лайкать фото пользователя: {SenderName}");
                         LikePhotos(Sender.Id, ConfId, SenderName);
+                        break;
+                    case 7:
+
                         break;
                     case 9:
                         if (random.Next(1, 4) == 1)
@@ -278,13 +329,10 @@ namespace StarBot
                     Console.WriteLine($"ОШИБКА, {i}/{posts.WallPosts.Count}");
                     if (ex is VkNet.Exception.CaptchaNeededException)
                         break;
-                    continue;
                 }
             }
             SendToConf($"Процесс завершен. Успешных лайков стены: {GoodLikes}. Ошибок: {Errors}", ChatId);
             Console.WriteLine($"Пользователь {SenderName} пролайкан. Успешных лайков стены: {GoodLikes}. Ошибок: {Errors}", ChatId);
-            GoodLikes = 0;
-            Errors = 0;
         }
         static void LikePhotos(long LikedUser, long ChatId, string SenderName)
         {
@@ -315,13 +363,10 @@ namespace StarBot
                     Errors++;
                     if (ex is VkNet.Exception.CaptchaNeededException)
                         break;
-                    continue;
                 }
             }
             SendToConf($"Процесс завершен. Успешных лайков фотографий: {GoodLikes}. Ошибок: {Errors}", ChatId);
             Console.WriteLine($"Пользователь {SenderName} пролайкан. Успешных лайков фотографий: {GoodLikes}. Ошибок: {Errors}");
-            GoodLikes = 0;
-            Errors = 0;
         }
         static void GetAndSetConfs(out int ConfID)
         {
