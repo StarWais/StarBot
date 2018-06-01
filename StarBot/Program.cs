@@ -8,6 +8,9 @@ using System.Threading;
 using VkNet.Model;
 using System.Text;
 using System.Threading.Tasks;
+using VkNet.Exception;
+using System.Collections.Generic;
+using System.Net;
 
 namespace StarBot
 {
@@ -15,6 +18,12 @@ namespace StarBot
     {
         static Random random = new Random();
         static VkApi vk = new VkApi();
+        static int ConfID;
+        static bool Busy = false;
+        static bool NeedCaptcha = false;
+        static string CaptchaMessage = String.Empty;
+        static LongPollServerResponse server;
+        static long CaptchaUserID = 0;
         static Func<string> code = () =>
         {
             Console.Write("Код авторизации: \nЕсли нет, то нажмите Enter");
@@ -44,8 +53,9 @@ namespace StarBot
                 var users = vk.Users.Get(temp, ProfileFields.Sex | ProfileFields.FirstName | ProfileFields.LastName);
                 User Bot = users[0];
                 Console.WriteLine($"Авторизация прошла успешно. Добро пожаловать, {Bot.FirstName} {Bot.LastName}.");
-                GetAndSetConfs(out int ConfID);
-                CheckMessages(ConfID);
+                GetAndSetConfs();
+                server = vk.Messages.GetLongPollServer();
+                Timer WatchTimer = new Timer(new TimerCallback(CheckMessages), null, 0, 2000);
                 Console.WriteLine($"Программа завершила свою работу");
                 Console.ReadKey();
             }
@@ -70,47 +80,45 @@ namespace StarBot
                 return false;
             }
         }
-        static void CheckMessages(int ConfID)
+        static async void CheckMessages(object state)
         {
             Console.WriteLine("Сканируем сообщения...");
             long BotID = vk.UserId.Value;
-            bool Enabled = true;
-            Message CurrentMessage = null;  
-            Message LastMessage = null;
-            bool IsFirst = true;
-            while (Enabled)
+            try
             {
-                Thread.Sleep(1000);
-                try
+                var longpoll = await vk.Messages.GetLongPollHistoryAsync(new MessagesGetLongPollHistoryParams
                 {
-                    if (IsFirst)
+                    Ts = server.Ts,
+                    Pts = server.Pts
+                });
+                var Messages = longpoll.Messages;
+                Message last = new Message();
+                foreach (var CurrentMessage in Messages)
+                {
+                    if (CurrentMessage.UserId != BotID && CurrentMessage.ChatId == ConfID && !CurrentMessage.ReadState.Equals(MessageReadState.Readed))
                     {
-                        LastMessage = vk.Messages.Get(new MessagesGetParams
-                        {
-                            Count = 1
-                        }).Messages[0];
-                        IsFirst = false;
-                    }
-                    else
-                    {
-                        CurrentMessage = vk.Messages.Get(new MessagesGetParams
-                        {
-                            Count = 1,
-                            Filters = MessagesFilter.All
-                        }).Messages[0];
-
-                        if (CurrentMessage.UserId != BotID && CurrentMessage.Date != LastMessage.Date && CurrentMessage.ChatId == ConfID)
+                        if(!Busy)
                         {
                             Command(Convert.ToInt32(CurrentMessage.UserId), CurrentMessage.Body, Convert.ToInt32(CurrentMessage.ChatId));
+                            CurrentMessage.ReadState = MessageReadState.Readed;
                         }
-                        LastMessage = CurrentMessage;
+                        else
+                        {
+                            SendToConf("Подожди, я пока занят", ConfID);
+                            if (NeedCaptcha)
+                            {
+                                if (CurrentMessage.UserId == CaptchaUserID)
+                                    CaptchaMessage = CurrentMessage.Body;
+                                NeedCaptcha = false;
+                                CaptchaMessage = String.Empty;
+                            }
+                        }
                     }
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Ошибка при мониторинге сообщений: {ex}");
-                    Enabled = false;
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при мониторинге сообщений: {ex}");
             }
         }
         static async void Command(long checkedUserID, string Message, long ConfId)
@@ -237,13 +245,15 @@ namespace StarBot
                         }
                     case 5:
                         Console.WriteLine($"Начинаем лайкать стену пользователя: {SenderName}");
+                        Busy = true;
                         LikeWall(Sender.Id, ConfId, SenderName);
+                        Busy = false;
                         break;
                     case 8:
                         Console.WriteLine($"Пробуем добавить в друзья пользователя: {SenderName}");
                         try
                         {
-                            vk.Friends.Add(Sender.Id);
+                            vk.Friends.Add(Sender.Id, follow:true);
                             Console.WriteLine($"Заявка отправлена пользователю {SenderName}");
                             SendToConf("Добавился", ConfId);
                         }
@@ -254,7 +264,9 @@ namespace StarBot
                         break;
                     case 6:
                         Console.WriteLine($"Начинаем лайкать фото пользователя: {SenderName}");
+                        Busy = true;
                         LikePhotos(Sender.Id, ConfId, SenderName);
+                        Busy = false;
                         break;
                     case 7:
 
@@ -310,29 +322,65 @@ namespace StarBot
             });
             for (int i = 0; i < posts.WallPosts.Count; i++)
             {
+                var temp = posts.WallPosts[i].Id;
                 try
                 {
-                    var temp = posts.WallPosts[i].Id;
                     Thread.Sleep(2000);
+                    GoodLikes++;
                     vk.Likes.Add(new LikesAddParams
                     {
                         OwnerId = LikedUser,
                         ItemId = long.Parse(temp.ToString()),
-                        Type = LikeObjectType.Post
+                        Type = LikeObjectType.Post,
                     });
-                    GoodLikes++;
                     Console.WriteLine($"Успех, {i}/{posts.WallPosts.Count}");
                 }
                 catch(Exception ex)
                 {
+                    if(!(ex is VkApiException))
+                        break;
                     Errors++;
-                    Console.WriteLine($"ОШИБКА, {i}/{posts.WallPosts.Count}");
-                    if (ex is VkNet.Exception.CaptchaNeededException)
+                    if (CheckCaptcha((VkApiException)ex, vk.Users.Get(new List<long>() { LikedUser })[0].FirstName))
+                    {
+                        NeedCaptcha = true;
+                        var ff = ex as CaptchaNeededException;
+                        try
+                        {
+                            vk.Likes.Add(new LikesAddParams
+                            {
+                                OwnerId = LikedUser,
+                                ItemId = long.Parse(temp.ToString()),
+                                Type = LikeObjectType.Post,
+                                CaptchaKey = CaptchaMessage,
+                                CaptchaSid = ff.Sid
+                            });
+                            GoodLikes++;
+                            Errors--;
+                        }
+                        catch (Exception) { }
+                        CaptchaMessage = String.Empty;
+                        NeedCaptcha = false;
+                    }
+                    else
                         break;
                 }
             }
             SendToConf($"Процесс завершен. Успешных лайков стены: {GoodLikes}. Ошибок: {Errors}", ChatId);
             Console.WriteLine($"Пользователь {SenderName} пролайкан. Успешных лайков стены: {GoodLikes}. Ошибок: {Errors}", ChatId);
+        }
+        static bool CheckCaptcha(VkApiException ex, string Name)
+        {
+            if (ex is CaptchaNeededException ff)
+            {
+                SendToConf($"Так-с, {Name} возникла капча, введи пожалуйста", ConfID);
+                vk.Messages.Send(new MessagesSendParams
+                {
+                    ChatId = ConfID,
+                    Message = ff.Img.ToString()
+                });
+                return true;
+            }
+            return false;
         }
         static void LikePhotos(long LikedUser, long ChatId, string SenderName)
         {
@@ -346,9 +394,9 @@ namespace StarBot
             });
             for (ulong i = 0; i < photos.TotalCount; i++)
             {
+                var temp = photos[Convert.ToInt32(i)].Id;
                 try
                 {
-                    var temp = photos[Convert.ToInt32(i)].Id;
                     Thread.Sleep(2000);
                     vk.Likes.Add(new LikesAddParams
                     {
@@ -360,15 +408,36 @@ namespace StarBot
                 }
                 catch(Exception ex)
                 {
+                    if (!(ex is VkApiException))
+                        break;
                     Errors++;
-                    if (ex is VkNet.Exception.CaptchaNeededException)
+                    if (CheckCaptcha((VkApiException)ex, vk.Users.Get(new List<long>() { LikedUser })[0].FirstName))
+                    {
+                        NeedCaptcha = true;
+                        var ff = ex as CaptchaNeededException;
+                        try
+                        {
+                            vk.Likes.Add(new LikesAddParams
+                            {
+                                OwnerId = LikedUser,
+                                ItemId = long.Parse(temp.ToString()),
+                                Type = LikeObjectType.Photo
+                            });
+                            GoodLikes++;
+                            Errors--;
+                        }
+                        catch (Exception) { }
+                        CaptchaMessage = String.Empty;
+                        NeedCaptcha = false;
+                    }
+                    else
                         break;
                 }
             }
             SendToConf($"Процесс завершен. Успешных лайков фотографий: {GoodLikes}. Ошибок: {Errors}", ChatId);
             Console.WriteLine($"Пользователь {SenderName} пролайкан. Успешных лайков фотографий: {GoodLikes}. Ошибок: {Errors}");
         }
-        static void GetAndSetConfs(out int ConfID)
+        static void GetAndSetConfs()
         {
             var Confs = vk.Messages.GetDialogs(new MessagesDialogsGetParams
             {
